@@ -30,6 +30,10 @@ on:
         description: 'Gradle task producing the XCFramework (blank to skip)'
         required: false
         default: 'assembleSharedKitReleaseXCFramework'
+      prebuild:
+        description: 'Script to run before xcodebuild, relative to the source root (e.g. iosApp/fetch-filament.sh). Blank to skip.'
+        required: false
+        default: ''
 
 concurrency:
   group: build-ios-sim
@@ -106,6 +110,19 @@ jobs:
           unzip -oq xg.zip && cd xcodegen && PREFIX="$HOME/.local" ./install.sh
           cd "$GITHUB_WORKSPACE/src/iosApp"
           "$HOME/.local/bin/xcodegen" generate
+
+      - name: Pre-build script
+        if: inputs.prebuild != ''
+        working-directory: src
+        run: |
+          set -euo pipefail
+          # Large binary dependencies are usually fetched, not vendored — this
+          # project keeps Filament's prebuilts out of git and pulls them here.
+          # Without this the build fails with "no XCFramework found", which
+          # looks like a code error and is not one.
+          chmod +x "${{ inputs.prebuild }}"
+          cd "$(dirname "${{ inputs.prebuild }}")"
+          "./$(basename "${{ inputs.prebuild }}")"
 
       - name: Build for simulator
         id: build
