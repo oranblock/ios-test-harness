@@ -153,6 +153,31 @@ report_screens() {
   echo "all screens survived launch"
 }
 
+# record_clip <seconds> <name> — film the simulator and send it to Telegram.
+#
+# A screenshot cannot answer "is it moving?", which is the only question worth
+# asking about a particle background. recordVideo must be stopped with SIGINT:
+# killing it any harder leaves an unfinalised, unplayable file.
+record_clip() {
+  local secs="${1:-3}" name="${2:-clip}"
+  local out="${REPORT_DIR}/${name}.mp4"
+  echo "  ● recording ${secs}s -> $(basename "$out")"
+  xcrun simctl io "$UDID" recordVideo --codec h264 --force "$out" >/dev/null 2>&1 &
+  local pid=$!
+  sleep "$secs"
+  kill -INT "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  sleep 1
+  [ -s "$out" ] || { echo "  ! no video captured"; return 0; }
+  echo "  ● $(du -h "$out" | cut -f1)"
+  _tg_enabled || return 0
+  curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendVideo" \
+    -F chat_id="${TELEGRAM_CHAT_ID}" \
+    -F video="@${out}" \
+    -F caption="🎥 ${name} · ${secs}s · ${BUNDLE_ID}" \
+    -o /dev/null || echo "  ! telegram video send failed"
+}
+
 # A flow that dies should still leave evidence, so capture the final frame
 # whatever happens.
 trap 'rc=$?; [ $rc -ne 0 ] && send_step "FAILURE_final_frame" "exit $rc" || true' EXIT
