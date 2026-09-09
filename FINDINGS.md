@@ -45,7 +45,7 @@ Secrets: `SOURCE_REPO_TOKEN` (read a private repo), `TELEGRAM_BOT_TOKEN` +
 | :--- | :--- |
 | `smoke` | launch, background, resume, rotate — knows nothing about the app |
 | `diagnose` | launch into EVERY screen, prove each survives, screenshot each |
-| `video` | film the running app and send the mp4 |
+| `video` | burst-capture frames and send them (see "Video" below) |
 
 Helpers in `scripts/lib.sh`: `launch`, `launch_screen`, `visit`, `tap`,
 `type_text`, `swipe`, `press`, `send_step`, `record_clip`, `assert_running`,
@@ -149,6 +149,63 @@ that shape, and sweep for it.
   gitignored; run the project's fetch script via the `prebuild` input, or the
   build dies with "no XCFramework found", which looks like a code error.
 
+## Video: capture frames, not video
+
+`simctl io recordVideo` **does not work in CI.** It finalises its mp4 only on
+SIGINT, and across three attempts it never stopped on one:
+
+| attempt | why it failed |
+| :--- | :--- |
+| `xcrun simctl io ... &` then `kill -INT $!` | `$!` is xcrun's pid; it forks simctl and exits |
+| `pkill -INT -f "simctl io .* recordVideo"` | found the process, signal had no effect |
+| `$(xcrun --find simctl) io ... &` then `kill -INT $!` | `$!` was the recorder; still ignored it |
+
+Killing it harder produces an **8 MB file with media data and no `moov` atom** —
+plausible size, reports success, plays nowhere. One was sent to Telegram as if
+fine.
+
+Use a **burst of screenshots** instead. Every frame is complete when written, so
+the worst case is fewer frames rather than a corrupt file that claims to be good.
+`record_clip` captures `CLIP_FPS` (default 5) frames per second, stitches with
+ffmpeg if present, and otherwise sends the stills.
+
+**There is no ffmpeg on the macOS runner images**, so in practice it sends
+frames. That is fine: several stills a fraction of a second apart answer "is it
+moving", which is the only question a clip is for.
+
+**Proving animation:** `md5sum` every frame. 15 of 15 unique means the scene is
+genuinely animating; identical hashes mean a stalled render or a static image.
+That is evidence; "it looks animated" is not.
+
+**If you produce an mp4 anywhere, check it:** `grep -qa moov file.mp4`. A size
+proves a file exists, not that it opens.
+
+## idb is effectively unavailable in CI
+
+Homebrew refuses the tap on both macos-14 and macos-15 ("Refusing to load formula
+facebook/fb/idb-companion from untrusted tap"), and `HOMEBREW_ALLOW_UNTRUSTED_TAPS`
+did not get past it. **So taps, typing, swipes and rotation do not run in CI
+today.** Everything that catches a crash — launch, screenshots, liveness — is
+pure `simctl` and works.
+
+Design flows so this degrades rather than blocks: prefer launch-env navigation,
+treat taps as a bonus, and never let a missing idb fail a run.
+
+## The shell lies, three ways
+
+Each of these cost a full CI round in one session. They share a shape: the code
+looks like it says one thing and the shell does another.
+
+| written | actually |
+| :--- | :--- |
+| `cmd > log 2>&1; rc=$?` | `bash -e` exits at `cmd`; `rc` never runs |
+| `xcrun tool ... & ; kill $!` | `$!` is the WRAPPER, not the tool |
+| `[ -f x ] && y` ending a loop body | returns 1 when absent, `set -e` kills the step |
+| `kill -KILL "$pid"` | returns 1 if already dead, `set -e` kills the step |
+
+Rule: any step that inspects its own failure starts with `set +e`, and any helper
+producing evidence rather than an assertion ends with `return 0`.
+
 ## Telegram
 
 A bot token from @BotFather is static — **no OTP, no session, no login**. That is
@@ -172,3 +229,21 @@ They answer questions no log does. From one sweep: the app never left its
 first-run language picker; its active row was clipped under the status bar (a
 missing top safe-area inset); and background particles moved between frames,
 proving animation. Download with `gh run download`, unzip, and actually look.
+
+---
+
+# Known blockers
+
+Not bugs to fix — limits to design around.
+
+| blocker | status |
+| :--- | :--- |
+| **Filament screens cannot run on any iOS simulator** | Permanent. Argument buffers break the simulator's XPC Metal proxy; verified on Xcode 15.4/iOS 17 and 16.4/iOS 26. These screens need real hardware. |
+| **idb unavailable** (Homebrew refuses the tap) | No taps/typing/swipes/rotation in CI. Use launch-env navigation. |
+| **No ffmpeg on runner images** | Clips ship as frames, not mp4. |
+| **`simctl io recordVideo` unusable** | Never finalises on SIGINT in CI. Use the frame burst. |
+| **Artifacts are public on a public repo** | Keep app binaries as artifacts (auth-gated download), never release assets. |
+
+When a screen fails, check the toolchain before the code: the same commit gave
+different verdicts on Xcode 15.4 and 16.4, and one "crash" was purely the older
+runtime.

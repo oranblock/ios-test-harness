@@ -11,9 +11,28 @@ app.
 ```
 .github/workflows/test-and-report.yml   runner setup, boot, install, package, send
 scripts/lib.sh                          helpers: tap, type_text, swipe, send_step…
-flows/smoke.sh                          default flow — works on any app, day one
+flows/smoke.sh                          launch, background, resume — works on any app
+flows/diagnose.sh                       launch into EVERY screen, prove each survives
+flows/video.sh                          burst-capture frames: is it actually animating?
 flows/example-login.sh                  worked example to copy per project
 ```
+
+## What it does and does not do
+
+Proven on a real project (a Kotlin Multiplatform + SwiftUI game) in one session:
+compiled it, ran it on a simulator, found which screens crash, and photographed
+each one.
+
+| works | does not work |
+| :--- | :--- |
+| build a private repo on free public-repo macOS runners | **Filament screens** — abort on every iOS simulator |
+| launch, screenshot, prove a process survives | **taps / typing / rotation** — idb will not install |
+| launch straight into a named screen (no coordinates) | **mp4 recording** — never finalises in CI |
+| report to Telegram, a GitHub issue, and a secret gist | ffmpeg — not on the runner images |
+
+Every one of those limits is documented with its evidence in
+[FINDINGS.md](FINDINGS.md). They are limits to design around, not bugs awaiting a
+fix, and the flows degrade rather than fail when they bite.
 
 ## Setup, once
 
@@ -83,7 +102,15 @@ assert_running "login_survived"
 
 Every helper numbers its own step, so screenshots sort in execution order.
 
-### Two things that will bite you
+### Taps do not currently run in CI
+
+Homebrew refuses the `facebook/fb` tap on both macos-14 and macos-15, so idb
+does not install and `tap` / `type_text` / `swipe` / rotation are skipped. Launch,
+screenshots and liveness are pure `simctl` and work — which is what catches
+crashes. Prefer `launch_screen` over taps regardless: it needs no coordinates and
+cannot silently land on nothing.
+
+### If you do get idb working, two things will bite you
 
 **Coordinates are points and device-specific.** A tap that lands on an iPhone 16
 misses on an SE. Get real numbers by running `smoke` first and reading positions
