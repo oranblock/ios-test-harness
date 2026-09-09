@@ -47,6 +47,7 @@ jobs:
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
 
     steps:
       - name: Checkout harness
@@ -79,6 +80,9 @@ jobs:
         if: inputs.gradle_task != ''
         working-directory: src
         run: |
+          # `set +e`: GitHub invokes this with `bash -e`, so a failing build would
+          # exit the step before rc is captured and nothing useful gets reported.
+          set +e
           set -uo pipefail
           mkdir -p "$GITHUB_WORKSPACE/out"
           # Output goes to a FILE, not to the public job log: a Kotlin or Swift
@@ -107,6 +111,7 @@ jobs:
         id: build
         working-directory: src/iosApp
         run: |
+          set +e   # see the note on the gradle step
           set -uo pipefail
           mkdir -p "$GITHUB_WORKSPACE/out"
           PROJ=$(ls -d *.xcodeproj | head -1)
@@ -152,6 +157,36 @@ jobs:
               -F caption="${ICON} ${STATUS} · $(basename "$f") · ${{ inputs.source_repo }}@${{ steps.meta.outputs.sha }}" \
               -o /dev/null || true
           done
+
+      - name: Stash logs in a secret gist
+        id: gist
+        if: always() && env.GIST_TOKEN != ''
+        run: |
+          set -uo pipefail
+          # Compiler output quotes private source, so it must not go in the
+          # public job log or the issue. A SECRET gist is owned by the account,
+          # unlisted, and readable with a `gist`-scoped token — which is how a
+          # maintainer (or an agent working on their behalf) reads the errors
+          # without the token ever passing through a chat window.
+          command -v gh >/dev/null || brew install gh
+          FILES=""
+          for f in out/xcodebuild.log out/gradle.log; do
+            [ -f "$f" ] && FILES="$FILES $f"
+          done
+          [ -n "$FILES" ] || { echo "no logs to stash"; exit 0; }
+          # Trim to the parts worth reading: full logs are tens of thousands of
+          # lines and a gist has limits.
+          mkdir -p out/trimmed
+          for f in $FILES; do
+            { grep -nE 'error:|warning: .*(deprecated|unavailable)|BUILD (SUCCEEDED|FAILED)' "$f" | head -200
+              echo "--- tail ---"
+              tail -60 "$f"; } > "out/trimmed/$(basename "$f")"
+          done
+          URL=$(GH_TOKEN="$GIST_TOKEN" gh gist create --secret \
+                  -d "iOS sim build ${{ inputs.source_repo }}@${{ steps.meta.outputs.sha }} ($(date -u +%FT%TZ))" \
+                  out/trimmed/* 2>/dev/null | tail -1)
+          echo "gist=$URL" >> "$GITHUB_OUTPUT"
+          echo "logs stashed (secret gist created)"
 
       - name: Upload simulator app
         if: success()
@@ -203,7 +238,9 @@ jobs:
               ``,
               detail,
               ``,
-              `<sub>Full logs were sent to Telegram, not posted here: this repo is public and compiler errors quote private source.</sub>`,
+              '${{ steps.gist.outputs.gist }}' ? `**Full log (secret gist):** ${{ steps.gist.outputs.gist }}` : ``,
+              ``,
+              `<sub>Error text is not posted here: this repo is public and compiler errors quote private source. Full logs go to Telegram and, when GIST_TOKEN is set, to a secret gist linked above.</sub>`,
             ].filter(Boolean).join('\n');
 
             await github.rest.issues.create({
