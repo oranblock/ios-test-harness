@@ -111,6 +111,48 @@ assert_running() {
   fi
 }
 
+
+# launch_screen <env-value> [name] — cold-start straight into a screen.
+#
+# Deterministic where tapping is not: an app that reads a launch environment
+# variable can be driven to any screen without coordinates, without depending on
+# a menu's layout, and without first completing onboarding. simctl passes env
+# through the SIMCTL_CHILD_ prefix.
+#
+# Set SCREEN_ENV_VAR to the variable the app reads (default SKIRMISH_SCREEN).
+launch_screen() {
+  local value="$1" name="${2:-$1}"
+  local var="${SCREEN_ENV_VAR:-SKIRMISH_SCREEN}"
+  terminate
+  sleep 1
+  env "SIMCTL_CHILD_${var}=${value}" xcrun simctl launch "$UDID" "$BUNDLE_ID" >/dev/null 2>&1
+  sleep "${SCREEN_SETTLE:-5}"
+  send_step "$name"
+}
+
+# visit <env-value> [name] — launch a screen, prove it did not die, move on.
+# Records a failure and keeps going, so one broken screen does not hide the rest.
+FAILED_SCREENS=""
+visit() {
+  local value="$1" name="${2:-$1}"
+  launch_screen "$value" "$name"
+  if xcrun simctl spawn "$UDID" launchctl list 2>/dev/null | grep -q "$BUNDLE_ID"; then
+    echo "     ok: $name"
+  else
+    echo "     CRASHED: $name"
+    FAILED_SCREENS="$FAILED_SCREENS $name"
+  fi
+}
+
+# Call at the end of a sweep: fails the job if any screen died, naming them.
+report_screens() {
+  if [ -n "$FAILED_SCREENS" ]; then
+    echo "::error::screens that did not survive launch:$FAILED_SCREENS"
+    return 1
+  fi
+  echo "all screens survived launch"
+}
+
 # A flow that dies should still leave evidence, so capture the final frame
 # whatever happens.
 trap 'rc=$?; [ $rc -ne 0 ] && send_step "FAILURE_final_frame" "exit $rc" || true' EXIT
