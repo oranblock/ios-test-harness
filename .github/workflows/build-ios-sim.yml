@@ -231,7 +231,11 @@ jobs:
               echo "--- tail ---"
               tail -60 "$f"; } > "out/trimmed/$(basename "$f")"
           done
-          URL=$(GH_TOKEN="$GIST_TOKEN" gh gist create --secret \
+          # NOT `--secret`: that flag does not exist. `gh gist create` is secret by
+          # DEFAULT and the flag is `--public` to opt out — passing --secret made gh
+          # print its usage text and exit 1, which is the "empty" failure the last
+          # four runs reported. The token was fine the whole time.
+          URL=$(GH_TOKEN="$GIST_TOKEN" gh gist create \
                   -d "iOS sim build ${{ inputs.source_repo }}@${{ steps.meta.outputs.sha }} ($(date -u +%FT%TZ))" \
                   out/trimmed/* 2>&1 | tail -1)
           case "$URL" in
