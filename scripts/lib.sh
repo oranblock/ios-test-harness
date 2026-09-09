@@ -161,49 +161,56 @@ report_screens() {
 record_clip() {
   local secs="${1:-3}" name="${2:-clip}"
   local out="${REPORT_DIR}/${name}.mp4"
+  local frames="${REPORT_DIR}/.frames_${name}"
 
-  # Call the REAL simctl binary, not `xcrun simctl`. With the wrapper, $! is
-  # xcrun's pid; it forks simctl and exits, so SIGINT lands on a corpse and the
-  # recorder never finalises. An mp4 killed before finalisation has its media
-  # data but no `moov` atom, which most players refuse outright — an 8 MB file
-  # that looks like success and plays like nothing.
-  local simctl
-  simctl=$(xcrun --find simctl 2>/dev/null || echo "")
-  [ -x "$simctl" ] || { echo "  ! simctl not found, skipping video"; return 0; }
-
-  echo "  ● recording ${secs}s -> $(basename "$out")"
-  "$simctl" io "$UDID" recordVideo --codec h264 --force "$out" >/dev/null 2>&1 &
-  local pid=$!
-  sleep "$secs"
-
-  kill -INT "$pid" 2>/dev/null
-  local waited=0
-  while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 20 ]; do
-    sleep 1; waited=$((waited + 1))
+  # BURST OF SCREENSHOTS, not recordVideo.
+  #
+  # `simctl io recordVideo` finalises its mp4 only on SIGINT, and across three
+  # attempts here it never stopped on one — via xcrun, via pkill, and called
+  # directly. Killing it harder produces an 8 MB file with media data and no
+  # `moov` atom: it reports success, has a plausible size, and plays nowhere.
+  #
+  # Screenshots have no signal handling to get wrong. Every frame is complete the
+  # moment it is written, so the worst case is fewer frames rather than a corrupt
+  # file that claims to be fine.
+  mkdir -p "$frames"
+  local fps="${CLIP_FPS:-5}"
+  local total=$(( secs * fps ))
+  echo "  ● capturing ${total} frames over ${secs}s"
+  local i=0
+  while [ "$i" -lt "$total" ]; do
+    xcrun simctl io "$UDID" screenshot "$(printf '%s/f%04d.png' "$frames" "$i")" >/dev/null 2>&1 || true
+    i=$((i + 1))
   done
-  if kill -0 "$pid" 2>/dev/null; then
-    echo "  ! recorder did not stop in ${waited}s — terminating, file may be unplayable"
-    kill -TERM "$pid" 2>/dev/null; sleep 2; kill -KILL "$pid" 2>/dev/null
+  local got
+  got=$(ls "$frames"/*.png 2>/dev/null | wc -l | tr -d ' ')
+  echo "  ● captured ${got} frames"
+  [ "$got" -gt 1 ] || { echo "  ! too few frames for a clip"; return 0; }
+
+  if command -v ffmpeg >/dev/null 2>&1; then
+    ffmpeg -y -framerate "$fps" -pattern_type glob -i "$frames/*.png" \
+      -c:v libx264 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" \
+      "$out" >/dev/null 2>&1 || true
   fi
-  wait "$pid" 2>/dev/null || true
-  sleep 1
 
-  [ -s "$out" ] || { echo "  ! no video captured"; return 0; }
-
-  # Say whether it is actually playable rather than reporting a size and hoping.
-  # `moov` is the index; without it the file is data with no way to read it.
-  if grep -qa moov "$out" 2>/dev/null; then
-    echo "  ● $(du -h "$out" | cut -f1) — finalised (moov present)"
+  if [ -s "$out" ] && grep -qa moov "$out" 2>/dev/null; then
+    echo "  ● $(du -h "$out" | cut -f1) mp4 — finalised (moov present)"
+    _tg_enabled && curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendVideo" \
+      -F chat_id="${TELEGRAM_CHAT_ID}" -F video="@${out}" \
+      -F caption="🎥 ${name} · ${got} frames @ ${fps}fps · ${BUNDLE_ID}" -o /dev/null || true
   else
-    echo "  ! $(du -h "$out" | cut -f1) — NOT finalised (no moov atom); most players will refuse it"
-  fi
-
-  if _tg_enabled; then
-    curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendVideo" \
-      -F chat_id="${TELEGRAM_CHAT_ID}" \
-      -F video="@${out}" \
-      -F caption="🎥 ${name} · ${secs}s · ${BUNDLE_ID}" \
-      -o /dev/null || echo "  ! telegram video send failed"
+    # No ffmpeg, or it failed: send the frames themselves. Several stills a
+    # fraction of a second apart still answer "is it moving?", which is the only
+    # thing this clip is for.
+    echo "  ! no playable mp4 — sending frames instead"
+    local n=0
+    for f in "$frames"/*.png; do
+      n=$((n + 1))
+      [ $((n % 3)) -eq 1 ] || continue
+      _tg_enabled && curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto" \
+        -F chat_id="${TELEGRAM_CHAT_ID}" -F photo="@${f}" \
+        -F caption="🎞 ${name} frame ${n}/${got}" -o /dev/null || true
+    done
   fi
   return 0
 }
