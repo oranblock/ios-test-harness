@@ -6,8 +6,13 @@ on:
   workflow_dispatch:
     inputs:
       app_url:
-        description: 'Direct download URL for a SIMULATOR build (.zip containing a .app)'
-        required: true
+        description: 'Direct download URL for a SIMULATOR build (.zip containing a .app). Leave blank if using artifact_run_id.'
+        required: false
+        default: ''
+      artifact_run_id:
+        description: 'Run id of a Build iOS Simulator App run in THIS repo to take the .app from. Preferred over app_url — artifacts need auth, so a plain URL cannot fetch them.'
+        required: false
+        default: ''
       bundle_id:
         description: 'Bundle identifier, e.g. com.example.myapp'
         required: true
@@ -21,7 +26,8 @@ on:
         default: 'iPhone 16'
   workflow_call:
     inputs:
-      app_url: { required: true, type: string }
+      app_url: { required: false, type: string, default: '' }
+      artifact_run_id: { required: false, type: string, default: '' }
       bundle_id: { required: true, type: string }
       flow: { required: false, type: string, default: 'smoke' }
       device: { required: false, type: string, default: 'iPhone 16' }
@@ -75,12 +81,30 @@ jobs:
           echo "UDID=$UDID" >> "$GITHUB_ENV"
           xcrun simctl list devices | grep "$UDID"
 
+      - name: Fetch app from a build run
+        if: inputs.artifact_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Actions artifacts are not publicly fetchable — `curl` on the UI link gets
+          # HTML, not a zip. Downloading through gh keeps the app private and means
+          # the build and the test do not have to share a hosting bucket.
+          mkdir -p app_dir
+          gh run download "${{ inputs.artifact_run_id }}" --repo "${{ github.repository }}" --dir app_dir
+          for z in app_dir/*.zip app_dir/*/*.zip; do
+            [ -f "$z" ] && unzip -oq "$z" -d app_dir/
+          done
+          true
+
       - name: Download & install app
         run: |
           set -euo pipefail
           mkdir -p app_dir
-          curl -fSL "${{ inputs.app_url }}" -o app_dir/app.zip
-          unzip -q app_dir/app.zip -d app_dir/
+          if [ -n "${{ inputs.app_url }}" ]; then
+            curl -fSL "${{ inputs.app_url }}" -o app_dir/app.zip
+            unzip -q app_dir/app.zip -d app_dir/
+          fi
           APP_PATH=$(find app_dir -maxdepth 3 -name '*.app' | head -n1)
           [ -n "$APP_PATH" ] || { echo "::error::no .app inside the archive"; exit 1; }
           xcrun simctl install "$UDID" "$APP_PATH"
