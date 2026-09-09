@@ -162,33 +162,47 @@ record_clip() {
   local secs="${1:-3}" name="${2:-clip}"
   local out="${REPORT_DIR}/${name}.mp4"
   echo "  ● recording ${secs}s -> $(basename "$out")"
+
   xcrun simctl io "$UDID" recordVideo --codec h264 --force "$out" >/dev/null 2>&1 &
-  local pid=$!
+  local wrapper=$!
   sleep "$secs"
-  # SIGINT is what finalises the file — but if recordVideo ignores it, a bare
-  # `wait` hangs the job forever. A 3-second clip ran for 38 minutes this way.
-  kill -INT "$pid" 2>/dev/null
+
+  # Signal the RECORDER, not the wrapper. `$!` is the pid of `xcrun`, which
+  # execs/forks simctl — SIGINT to it never reaches the process holding the file,
+  # so the clip is never finalised and a bare wait hangs forever. pkill on the
+  # command line finds the real one. SIGINT specifically: anything harder leaves
+  # an unplayable file.
+  pkill -INT -f "simctl io .* recordVideo" 2>/dev/null || kill -INT "$wrapper" 2>/dev/null
+
   local waited=0
-  while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 15 ]; do
+  while pgrep -f "simctl io .* recordVideo" >/dev/null 2>&1 && [ "$waited" -lt 15 ]; do
     sleep 1; waited=$((waited + 1))
   done
-  if kill -0 "$pid" 2>/dev/null; then
-    echo "  ! recordVideo ignored SIGINT after ${waited}s — terminating (file may be unplayable)"
-    kill -TERM "$pid" 2>/dev/null
+  if pgrep -f "simctl io .* recordVideo" >/dev/null 2>&1; then
+    echo "  ! recorder still running after ${waited}s — terminating"
+    pkill -TERM -f "simctl io .* recordVideo" 2>/dev/null || true
     sleep 2
-    kill -KILL "$pid" 2>/dev/null
   fi
-  wait "$pid" 2>/dev/null || true
+  wait "$wrapper" 2>/dev/null || true
   sleep 1
-  [ -s "$out" ] || { echo "  ! no video captured"; return 0; }
-  echo "  ● $(du -h "$out" | cut -f1)"
-  _tg_enabled || return 0
-  curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendVideo" \
-    -F chat_id="${TELEGRAM_CHAT_ID}" \
-    -F video="@${out}" \
-    -F caption="🎥 ${name} · ${secs}s · ${BUNDLE_ID}" \
-    -o /dev/null || echo "  ! telegram video send failed"
+
+  if [ ! -s "$out" ]; then
+    echo "  ! no video captured"
+    return 0
+  fi
+  echo "  ● $(du -h "$out" | cut -f1) after ${waited}s"
+
+  if _tg_enabled; then
+    curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendVideo" \
+      -F chat_id="${TELEGRAM_CHAT_ID}" \
+      -F video="@${out}" \
+      -F caption="🎥 ${name} · ${secs}s · ${BUNDLE_ID}" \
+      -o /dev/null || echo "  ! telegram video send failed"
+  fi
+  # Never fail the flow over a recording: the clip is evidence, not an assertion.
+  return 0
 }
+
 
 # A flow that dies should still leave evidence, so capture the final frame
 # whatever happens.
