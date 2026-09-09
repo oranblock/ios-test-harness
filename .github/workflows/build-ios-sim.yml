@@ -207,6 +207,10 @@ jobs:
         id: gist
         if: always() && env.GIST_TOKEN != ''
         run: |
+          # `set +e` FIRST. GitHub runs this with `bash -e`, and the loop below ends
+          # each iteration with `[ -f "$f" ] && ...` — which returns 1 when a log is
+          # missing and killed the whole step in 0.09s with no output at all.
+          set +e
           set -uo pipefail
           # Compiler output quotes private source, so it must not go in the
           # public job log or the issue. A SECRET gist is owned by the account,
@@ -216,7 +220,7 @@ jobs:
           command -v gh >/dev/null || brew install gh
           FILES=""
           for f in out/xcodebuild.log out/gradle.log; do
-            [ -f "$f" ] && FILES="$FILES $f"
+            if [ -f "$f" ]; then FILES="$FILES $f"; fi
           done
           [ -n "$FILES" ] || { echo "no logs to stash"; exit 0; }
           # Trim to the parts worth reading: full logs are tens of thousands of
@@ -229,9 +233,17 @@ jobs:
           done
           URL=$(GH_TOKEN="$GIST_TOKEN" gh gist create --secret \
                   -d "iOS sim build ${{ inputs.source_repo }}@${{ steps.meta.outputs.sha }} ($(date -u +%FT%TZ))" \
-                  out/trimmed/* 2>/dev/null | tail -1)
-          echo "gist=$URL" >> "$GITHUB_OUTPUT"
-          echo "logs stashed (secret gist created)"
+                  out/trimmed/* 2>&1 | tail -1)
+          case "$URL" in
+            https://gist.github.com/*)
+              echo "gist=$URL" >> "$GITHUB_OUTPUT"
+              echo "logs stashed (secret gist created)" ;;
+            *)
+              # Report the failure instead of silently producing no link — the last
+              # three runs each lost their gist this way and nobody could tell why.
+              echo "::warning::gist creation failed: $URL" ;;
+          esac
+          exit 0
 
       - name: Upload simulator app
         if: success()
