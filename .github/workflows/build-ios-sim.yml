@@ -44,7 +44,11 @@ on:
         default: '16'
 
 concurrency:
-  group: build-ios-sim
+  # Keyed by what is actually being built, not by the workflow name. A single
+  # global group meant dispatching an Xcode 15.4 run silently CANCELLED the
+  # Xcode 16 run of the same commit — and comparing two toolchains is exactly
+  # what this workflow is for.
+  group: build-ios-sim-${{ inputs.source_repo }}-${{ inputs.ref }}-${{ inputs.runner }}-${{ inputs.xcode }}
   cancel-in-progress: true
 
 permissions:
