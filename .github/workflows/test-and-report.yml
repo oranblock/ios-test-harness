@@ -24,6 +24,14 @@ on:
         description: 'Simulator device name'
         required: false
         default: 'iPhone 16'
+      runner:
+        description: 'Runner image. Both macos-14 and macos-15 are Apple Silicon with paravirtualised Metal; what differs is the SIMULATOR RUNTIME, which is where feature gaps like argument buffers live.'
+        required: false
+        default: 'macos-14'
+      xcode:
+        description: 'Xcode major version to select (e.g. 16). Blank uses the image default.'
+        required: false
+        default: ''
   workflow_call:
     inputs:
       app_url: { required: false, type: string, default: '' }
@@ -31,6 +39,8 @@ on:
       bundle_id: { required: true, type: string }
       flow: { required: false, type: string, default: 'smoke' }
       device: { required: false, type: string, default: 'iPhone 16' }
+      runner: { required: false, type: string, default: 'macos-14' }
+      xcode: { required: false, type: string, default: '' }
     secrets:
       TELEGRAM_BOT_TOKEN: { required: false }
       TELEGRAM_CHAT_ID: { required: false }
@@ -41,7 +51,7 @@ concurrency:
 
 jobs:
   run-tests:
-    runs-on: macos-14
+    runs-on: ${{ inputs.runner || 'macos-14' }}
     timeout-minutes: 45
 
     env:
@@ -53,6 +63,21 @@ jobs:
       DEVICE: ${{ inputs.device || 'iPhone 16' }}
 
     steps:
+      - name: Select Xcode
+        if: inputs.xcode != ''
+        run: |
+          set -euo pipefail
+          APP=$(ls -d /Applications/Xcode_${{ inputs.xcode }}*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$APP" ]; then
+            echo "::warning::no Xcode ${{ inputs.xcode }} on this image; using default"
+          else
+            sudo xcode-select -s "$APP/Contents/Developer"
+          fi
+          xcodebuild -version
+          # The simulator RUNTIME is the thing that matters for Metal feature gaps,
+          # so record which one is actually installed.
+          xcrun simctl list runtimes | grep -i ios || true
+
       - uses: actions/checkout@v4
 
       - name: Install idb (optional)
