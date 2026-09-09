@@ -165,8 +165,20 @@ record_clip() {
   xcrun simctl io "$UDID" recordVideo --codec h264 --force "$out" >/dev/null 2>&1 &
   local pid=$!
   sleep "$secs"
+  # SIGINT is what finalises the file — but if recordVideo ignores it, a bare
+  # `wait` hangs the job forever. A 3-second clip ran for 38 minutes this way.
   kill -INT "$pid" 2>/dev/null
-  wait "$pid" 2>/dev/null
+  local waited=0
+  while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 15 ]; do
+    sleep 1; waited=$((waited + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "  ! recordVideo ignored SIGINT after ${waited}s — terminating (file may be unplayable)"
+    kill -TERM "$pid" 2>/dev/null
+    sleep 2
+    kill -KILL "$pid" 2>/dev/null
+  fi
+  wait "$pid" 2>/dev/null || true
   sleep 1
   [ -s "$out" ] || { echo "  ! no video captured"; return 0; }
   echo "  ● $(du -h "$out" | cut -f1)"
