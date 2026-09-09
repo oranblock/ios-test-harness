@@ -24,9 +24,9 @@ assert_running "after_resume"
 
 # Rotation shakes out layout crashes cheaply.
 if [ "$HAVE_IDB" = 1 ]; then
-  idb ui rotate landscape 2>/dev/null || echo "(rotate unsupported)"
+  idb ui rotate --udid "$UDID" landscape 2>/dev/null || echo "(rotate unsupported)"
   sleep 2; send_step "landscape"
-  idb ui rotate portrait 2>/dev/null || true
+  idb ui rotate --udid "$UDID" portrait 2>/dev/null || true
   sleep 2; send_step "portrait"
 else
   echo "  ~ rotation skipped (no idb)"
