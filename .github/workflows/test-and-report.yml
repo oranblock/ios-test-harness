@@ -1,0 +1,152 @@
+name: iOS Simulator Test & Report
+
+# Point this at ANY iOS simulator build. Nothing here is app-specific: the app
+# comes in by URL, the bundle id by input, and what to do with it by flow file.
+on:
+  workflow_dispatch:
+    inputs:
+      app_url:
+        description: 'Direct download URL for a SIMULATOR build (.zip containing a .app)'
+        required: true
+      bundle_id:
+        description: 'Bundle identifier, e.g. com.example.myapp'
+        required: true
+      flow:
+        description: 'Flow file under flows/ (without .sh)'
+        required: false
+        default: 'smoke'
+      device:
+        description: 'Simulator device name'
+        required: false
+        default: 'iPhone 16'
+  workflow_call:
+    inputs:
+      app_url: { required: true, type: string }
+      bundle_id: { required: true, type: string }
+      flow: { required: false, type: string, default: 'smoke' }
+      device: { required: false, type: string, default: 'iPhone 16' }
+    secrets:
+      TELEGRAM_BOT_TOKEN: { required: false }
+      TELEGRAM_CHAT_ID: { required: false }
+
+concurrency:
+  group: ios-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  run-tests:
+    runs-on: macos-14
+    timeout-minutes: 45
+
+    env:
+      # Never echo these. Passed to curl via -F only; see scripts/lib.sh.
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      BUNDLE_ID: ${{ inputs.bundle_id }}
+      FLOW: ${{ inputs.flow || 'smoke' }}
+      DEVICE: ${{ inputs.device || 'iPhone 16' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install idb
+        run: |
+          brew tap facebook/fb
+          brew install idb-companion
+          pipx install fb-idb || pip3 install --break-system-packages fb-idb
+
+      - name: Boot simulator
+        run: |
+          set -euo pipefail
+          # Runner images change their preinstalled devices without warning, so
+          # take the requested device, then ANY iPhone, rather than failing on a
+          # hardcoded model that quietly disappeared.
+          UDID=$(xcrun simctl list devices available \
+                 | grep -m1 "$DEVICE (" | grep -oE '[0-9A-F-]{36}' || true)
+          if [ -z "$UDID" ]; then
+            echo "::warning::'$DEVICE' not available; falling back to first available iPhone"
+            UDID=$(xcrun simctl list devices available \
+                   | grep -m1 "iPhone" | grep -oE '[0-9A-F-]{36}')
+          fi
+          [ -n "$UDID" ] || { echo "::error::no iPhone simulator available"; exit 1; }
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+          idb connect "$UDID" || true
+          echo "UDID=$UDID" >> "$GITHUB_ENV"
+          xcrun simctl list devices | grep "$UDID"
+
+      - name: Download & install app
+        run: |
+          set -euo pipefail
+          mkdir -p app_dir
+          curl -fSL "${{ inputs.app_url }}" -o app_dir/app.zip
+          unzip -q app_dir/app.zip -d app_dir/
+          APP_PATH=$(find app_dir -maxdepth 3 -name '*.app' | head -n1)
+          [ -n "$APP_PATH" ] || { echo "::error::no .app inside the archive"; exit 1; }
+          xcrun simctl install "$UDID" "$APP_PATH"
+          echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
+
+      - name: Prepare report dir
+        run: |
+          set -euo pipefail
+          TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+          REPORT_DIR="report_${TIMESTAMP}"
+          mkdir -p "$REPORT_DIR/screenshots" "$REPORT_DIR/logs" "$REPORT_DIR/crashes"
+          echo "REPORT_DIR=$REPORT_DIR" >> "$GITHUB_ENV"
+          echo "TIMESTAMP=$TIMESTAMP" >> "$GITHUB_ENV"
+
+      - name: Start log stream
+        run: |
+          set -euo pipefail
+          # nohup so the later kill actually reaches `log stream` rather than
+          # just the wrapping shell.
+          nohup xcrun simctl spawn "$UDID" log stream \
+            --style compact --predicate "process == \"$BUNDLE_ID\"" \
+            > "$REPORT_DIR/logs/app_process.log" 2>&1 &
+          echo "LOG_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Run flow
+        run: |
+          set -euo pipefail
+          [ -f "flows/${FLOW}.sh" ] || { echo "::error::flows/${FLOW}.sh not found"; exit 1; }
+          chmod +x scripts/lib.sh "flows/${FLOW}.sh"
+          ./flows/"${FLOW}".sh
+
+      - name: Package report
+        if: always()
+        run: |
+          set -uo pipefail
+          kill "$LOG_PID" 2>/dev/null || true
+          cp ~/Library/Logs/DiagnosticReports/* "$REPORT_DIR/crashes/" 2>/dev/null || true
+          # A crash file is the single most useful thing in the archive, so
+          # surface it in the job log rather than burying it in a zip.
+          if [ -n "$(ls -A "$REPORT_DIR/crashes/" 2>/dev/null)" ]; then
+            echo "::warning::crash reports captured — see the archive"
+          fi
+          ARCHIVE_NAME="debug_report_${TIMESTAMP}.zip"
+          zip -qr "$ARCHIVE_NAME" "$REPORT_DIR"
+          echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> "$GITHUB_ENV"
+
+      - name: Send report to Telegram
+        if: always()
+        run: |
+          set -uo pipefail
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+            echo "Telegram secrets not set — skipping send (the artifact still has everything)."
+            exit 0
+          fi
+          STATUS="${{ job.status }}"
+          ICON='❌'; [ "$STATUS" = success ] && ICON='✅'
+          CAPTION="${ICON} <b>${STATUS}</b>%0A📅 ${TIMESTAMP}%0A📦 <code>${BUNDLE_ID}</code>%0A🎬 flow: <code>${FLOW}</code>"
+          curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
+            -F chat_id="${TELEGRAM_CHAT_ID}" \
+            -F document="@${ARCHIVE_NAME}" \
+            -F caption="$CAPTION" \
+            -F parse_mode="HTML" -o /dev/null
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: debug-report-${{ env.TIMESTAMP }}
+          path: ${{ env.ARCHIVE_NAME }}
+          retention-days: 14
