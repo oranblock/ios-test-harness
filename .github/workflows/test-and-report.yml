@@ -46,7 +46,10 @@ on:
       TELEGRAM_CHAT_ID: { required: false }
 
 concurrency:
-  group: ios-test-${{ github.ref }}
+  # Keyed by what is being tested. A group of just the ref meant dispatching a
+  # diagnose run silently CANCELLED an in-flight video run of the same app —
+  # the same mistake already fixed in the build workflow and not carried across.
+  group: ios-test-${{ inputs.bundle_id }}-${{ inputs.flow }}-${{ inputs.runner }}
   cancel-in-progress: true
 
 jobs:
