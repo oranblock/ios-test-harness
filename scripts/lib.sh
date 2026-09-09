@@ -161,36 +161,42 @@ report_screens() {
 record_clip() {
   local secs="${1:-3}" name="${2:-clip}"
   local out="${REPORT_DIR}/${name}.mp4"
-  echo "  ● recording ${secs}s -> $(basename "$out")"
 
-  xcrun simctl io "$UDID" recordVideo --codec h264 --force "$out" >/dev/null 2>&1 &
-  local wrapper=$!
+  # Call the REAL simctl binary, not `xcrun simctl`. With the wrapper, $! is
+  # xcrun's pid; it forks simctl and exits, so SIGINT lands on a corpse and the
+  # recorder never finalises. An mp4 killed before finalisation has its media
+  # data but no `moov` atom, which most players refuse outright — an 8 MB file
+  # that looks like success and plays like nothing.
+  local simctl
+  simctl=$(xcrun --find simctl 2>/dev/null || echo "")
+  [ -x "$simctl" ] || { echo "  ! simctl not found, skipping video"; return 0; }
+
+  echo "  ● recording ${secs}s -> $(basename "$out")"
+  "$simctl" io "$UDID" recordVideo --codec h264 --force "$out" >/dev/null 2>&1 &
+  local pid=$!
   sleep "$secs"
 
-  # Signal the RECORDER, not the wrapper. `$!` is the pid of `xcrun`, which
-  # execs/forks simctl — SIGINT to it never reaches the process holding the file,
-  # so the clip is never finalised and a bare wait hangs forever. pkill on the
-  # command line finds the real one. SIGINT specifically: anything harder leaves
-  # an unplayable file.
-  pkill -INT -f "simctl io .* recordVideo" 2>/dev/null || kill -INT "$wrapper" 2>/dev/null
-
+  kill -INT "$pid" 2>/dev/null
   local waited=0
-  while pgrep -f "simctl io .* recordVideo" >/dev/null 2>&1 && [ "$waited" -lt 15 ]; do
+  while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 20 ]; do
     sleep 1; waited=$((waited + 1))
   done
-  if pgrep -f "simctl io .* recordVideo" >/dev/null 2>&1; then
-    echo "  ! recorder still running after ${waited}s — terminating"
-    pkill -TERM -f "simctl io .* recordVideo" 2>/dev/null || true
-    sleep 2
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "  ! recorder did not stop in ${waited}s — terminating, file may be unplayable"
+    kill -TERM "$pid" 2>/dev/null; sleep 2; kill -KILL "$pid" 2>/dev/null
   fi
-  wait "$wrapper" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
   sleep 1
 
-  if [ ! -s "$out" ]; then
-    echo "  ! no video captured"
-    return 0
+  [ -s "$out" ] || { echo "  ! no video captured"; return 0; }
+
+  # Say whether it is actually playable rather than reporting a size and hoping.
+  # `moov` is the index; without it the file is data with no way to read it.
+  if grep -qa moov "$out" 2>/dev/null; then
+    echo "  ● $(du -h "$out" | cut -f1) — finalised (moov present)"
+  else
+    echo "  ! $(du -h "$out" | cut -f1) — NOT finalised (no moov atom); most players will refuse it"
   fi
-  echo "  ● $(du -h "$out" | cut -f1) after ${waited}s"
 
   if _tg_enabled; then
     curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendVideo" \
@@ -199,7 +205,6 @@ record_clip() {
       -F caption="🎥 ${name} · ${secs}s · ${BUNDLE_ID}" \
       -o /dev/null || echo "  ! telegram video send failed"
   fi
-  # Never fail the flow over a recording: the clip is evidence, not an assertion.
   return 0
 }
 
