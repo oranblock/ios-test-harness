@@ -23,12 +23,14 @@ launch "resumed"
 assert_running "after_resume"
 
 # Rotation shakes out layout crashes cheaply.
-idb ui rotate landscape 2>/dev/null || echo "(rotate unsupported, skipping)"
-sleep 2
-send_step "landscape"
-idb ui rotate portrait 2>/dev/null || true
-sleep 2
-send_step "portrait"
+if [ "$HAVE_IDB" = 1 ]; then
+  idb ui rotate landscape 2>/dev/null || echo "(rotate unsupported)"
+  sleep 2; send_step "landscape"
+  idb ui rotate portrait 2>/dev/null || true
+  sleep 2; send_step "portrait"
+else
+  echo "  ~ rotation skipped (no idb)"
+fi
 
 assert_running "final"
 echo "== smoke complete =="

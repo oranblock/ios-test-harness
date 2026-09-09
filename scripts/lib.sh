@@ -25,6 +25,21 @@ _tg_enabled() { [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}"
 # has to be escaped or a stray < silently truncates the message.
 _html_escape() { sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
 
+# idb drives taps, swipes and rotation. It is OPTIONAL: Homebrew now refuses the
+# facebook/fb tap on some runner images, and everything that actually catches a
+# crash — launch, screenshot, process liveness — is pure simctl. When idb is
+# missing those helpers log and skip instead of failing the run, so a smoke test
+# still reports the failures that matter.
+HAVE_IDB=0
+command -v idb >/dev/null 2>&1 && HAVE_IDB=1
+[ "$HAVE_IDB" = 1 ] || echo "!! idb unavailable — tap/type/swipe/rotate will be SKIPPED (launch + crash checks still run)"
+
+_need_idb() {
+  if [ "$HAVE_IDB" = 1 ]; then return 0; fi
+  echo "  ~ skipped ($1): idb unavailable"
+  return 1
+}
+
 # --- helpers you use in flows ------------------------------------------------
 
 # send_step <name> [note]  — screenshot + log tail, no interaction
@@ -53,16 +68,21 @@ send_step() {
 }
 
 # tap <x> <y> <name>
-tap() { echo "tap ($1,$2)"; idb ui tap "$1" "$2"; sleep "${TAP_SETTLE:-1}"; send_step "$3"; }
+tap() { _need_idb "tap $3" || return 0; echo "tap ($1,$2)"; idb ui tap "$1" "$2"; sleep "${TAP_SETTLE:-1}"; send_step "$3"; }
 
 # type_text <text> <name>
-type_text() { echo "type"; idb ui text "$1"; sleep 1; send_step "$2"; }
+type_text() { _need_idb "type $2" || return 0; echo "type"; idb ui text "$1"; sleep 1; send_step "$2"; }
 
 # swipe <x1> <y1> <x2> <y2> <name>
-swipe() { echo "swipe"; idb ui swipe "$1" "$2" "$3" "$4"; sleep 1; send_step "$5"; }
+swipe() { _need_idb "swipe $5" || return 0; echo "swipe"; idb ui swipe "$1" "$2" "$3" "$4"; sleep 1; send_step "$5"; }
 
 # press <HOME|LOCK|SIRI> <name>
-press() { idb ui button "$1"; sleep 1; send_step "$2"; }
+# Falls back to terminate: without idb there is no HOME button, but killing and
+# relaunching exercises the same cold-start path a resume crash hides in.
+press() {
+  if [ "$HAVE_IDB" = 1 ]; then idb ui button "$1"; else echo "  ~ no idb: terminating instead of pressing $1"; terminate; fi
+  sleep 1; send_step "$2"
+}
 
 # launch [name] — cold start
 launch() {

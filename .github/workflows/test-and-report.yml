@@ -55,11 +55,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install idb
+      - name: Install idb (optional)
+        id: idb
+        continue-on-error: true
         run: |
-          brew tap facebook/fb
-          brew install idb-companion
+          set +e
+          # Homebrew now refuses third-party taps by default ("Refusing to load
+          # formula ... from untrusted tap"), which killed this step outright.
+          # idb is only needed for TAPS and rotation — launch, screenshot and the
+          # crash assertions are pure simctl — so it is optional and the flows
+          # degrade rather than the job dying.
+          export HOMEBREW_NO_INSTALL_FROM_API=1
+          brew tap facebook/fb 2>/dev/null
+          HOMEBREW_ALLOW_UNTRUSTED_TAPS=1 brew install facebook/fb/idb-companion
           pipx install fb-idb || pip3 install --break-system-packages fb-idb
+          if command -v idb >/dev/null 2>&1; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::idb unavailable — tap/swipe/rotate steps will be skipped"
+          fi
+          exit 0
 
       - name: Boot simulator
         run: |
@@ -77,7 +93,7 @@ jobs:
           [ -n "$UDID" ] || { echo "::error::no iPhone simulator available"; exit 1; }
           xcrun simctl boot "$UDID" || true
           xcrun simctl bootstatus "$UDID" -b
-          idb connect "$UDID" || true
+          if command -v idb >/dev/null 2>&1; then idb connect "$UDID" || true; fi
           echo "UDID=$UDID" >> "$GITHUB_ENV"
           xcrun simctl list devices | grep "$UDID"
 
@@ -139,7 +155,19 @@ jobs:
       - name: Package report
         if: always()
         run: |
+          set +e
           set -uo pipefail
+          # Guarded: when an earlier step fails, REPORT_DIR may never have been set,
+          # and this step then failed too — turning one real error into four noisy
+          # ones and leaving upload-artifact with no path at all.
+          if [ -z "${REPORT_DIR:-}" ]; then
+            echo "no report dir — the run failed before setup"
+            REPORT_DIR="report_orphan"; TIMESTAMP="${TIMESTAMP:-orphan}"
+            mkdir -p "$REPORT_DIR"
+            echo "run failed before the report directory existed" > "$REPORT_DIR/README.txt"
+            echo "REPORT_DIR=$REPORT_DIR" >> "$GITHUB_ENV"
+            echo "TIMESTAMP=$TIMESTAMP" >> "$GITHUB_ENV"
+          fi
           kill "$LOG_PID" 2>/dev/null || true
           cp ~/Library/Logs/DiagnosticReports/* "$REPORT_DIR/crashes/" 2>/dev/null || true
           # A crash file is the single most useful thing in the archive, so
@@ -150,11 +178,13 @@ jobs:
           ARCHIVE_NAME="debug_report_${TIMESTAMP}.zip"
           zip -qr "$ARCHIVE_NAME" "$REPORT_DIR"
           echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> "$GITHUB_ENV"
+          exit 0
 
       - name: Send report to Telegram
         if: always()
         run: |
           set -uo pipefail
+          [ -f "${ARCHIVE_NAME:-}" ] || { echo "no archive to send"; exit 0; }
           if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
             echo "Telegram secrets not set — skipping send (the artifact still has everything)."
             exit 0
@@ -171,6 +201,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: debug-report-${{ env.TIMESTAMP }}
-          path: ${{ env.ARCHIVE_NAME }}
+          name: debug-report-${{ env.TIMESTAMP || github.run_id }}
+          path: ${{ env.ARCHIVE_NAME || 'report_*' }}
+          if-no-files-found: warn
           retention-days: 14
