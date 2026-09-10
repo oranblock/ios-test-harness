@@ -1,0 +1,17 @@
+{
+  "name": "ios-test-harness",
+  "description": "Build and RUN an iOS app in GitHub Actions — compile for the simulator, launch it, screenshot/record every screen, and report to Telegram, a GitHub issue, or a secret gist. Use when asked to test an iOS app in CI, get screenshots or video of an iOS app, diagnose which screens crash, compile a private iOS/KMP project on free macOS runners, or when no Mac is available. Repo: oranblock/ios-test-harness.",
+  "version": "1.0.0",
+  "author": {
+    "name": "oranblock",
+    "url": "https://github.com/oranblock/ios-test-harness"
+  },
+  "homepage": "https://github.com/oranblock/ios-test-harness",
+  "keywords": [
+    "ci",
+    "testing",
+    "github-actions",
+    "mobile",
+    "screenshots"
+  ]
+}

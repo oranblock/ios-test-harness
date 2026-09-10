@@ -34,6 +34,20 @@ Every one of those limits is documented with its evidence in
 [FINDINGS.md](FINDINGS.md). They are limits to design around, not bugs awaiting a
 fix, and the flows degrade rather than fail when they bite.
 
+## Install as a Claude Code plugin
+
+This repo is also a Claude Code plugin. It ships the `ios-test-harness` skill, which
+carries the hard-won CI facts — the failures that cost a round each — so Claude
+drives these workflows correctly instead of rediscovering them.
+
+```
+/plugin marketplace add oranblock/ios-test-harness
+/plugin install ios-test-harness@ios-test-harness
+```
+
+The skill loads on its own when you ask to test, screenshot or diagnose an app in
+CI. `skills/ios-test-harness/SKILL.md` is readable on its own if you would rather just read it.
+
 ## Setup, once
 
 Add two repository secrets (**Settings → Secrets and variables → Actions**):
